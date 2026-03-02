@@ -1,38 +1,53 @@
-"""SpeakPilot entrypoint for Module 1 + Module 2 + Module 3 pipeline."""
+"""SpeakPilot entrypoint integrating async backend with PyQt6 overlay UI."""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import json
 import logging
-from datetime import datetime
+import sys
+import threading
+from typing import Optional
+
+from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtWidgets import QApplication
 
 from speakpilot.audio_manager import AudioChunk, AudioManager
 from speakpilot.corrector import Corrector
+from speakpilot.overlay_ui import FloatingWindow
 from speakpilot.transcriber import Transcriber
 
 logger = logging.getLogger(__name__)
 
-RED = "\033[91m"
-GREEN = "\033[92m"
-RESET = "\033[0m"
+
+class BackendBridge(QObject):
+    correction_ready = pyqtSignal(dict)
+    backend_error = pyqtSignal(str)
+    backend_stopped = pyqtSignal()
 
 
-async def produce_audio_chunks(audio_manager: AudioManager, queue: asyncio.Queue[AudioChunk]) -> None:
-    """Read chunk stream from AudioManager and enqueue for transcription."""
+async def produce_audio_chunks(
+    audio_manager: AudioManager,
+    audio_queue: asyncio.Queue[AudioChunk],
+    stop_event: threading.Event,
+) -> None:
     async for chunk in audio_manager.chunks():
-        await queue.put(chunk)
+        if stop_event.is_set():
+            return
+        await audio_queue.put(chunk)
 
 
 async def consume_transcriptions(
     transcriber: Transcriber,
     audio_queue: asyncio.Queue[AudioChunk],
     correction_queue: asyncio.Queue[str],
+    stop_event: threading.Event,
 ) -> None:
-    """Transcribe chunks and forward non-empty text to correction queue."""
-    while True:
-        chunk = await audio_queue.get()
+    while not stop_event.is_set():
+        try:
+            chunk = await asyncio.wait_for(audio_queue.get(), timeout=0.2)
+        except asyncio.TimeoutError:
+            continue
+
         try:
             text = await transcriber.transcribe_bytes(chunk.pcm16)
             if text:
@@ -41,22 +56,27 @@ async def consume_transcriptions(
             audio_queue.task_done()
 
 
-async def consume_corrections(corrector: Corrector, queue: asyncio.Queue[str]) -> None:
-    """Analyze text using LLM and print formatted JSON to terminal."""
-    while True:
-        text = await queue.get()
+async def consume_corrections(
+    corrector: Corrector,
+    correction_queue: asyncio.Queue[str],
+    bridge: BackendBridge,
+    stop_event: threading.Event,
+) -> None:
+    while not stop_event.is_set():
+        try:
+            text = await asyncio.wait_for(correction_queue.get(), timeout=0.2)
+        except asyncio.TimeoutError:
+            continue
+
         try:
             result = await corrector.analyze_text(text)
             if result:
-                ts = datetime.now().strftime("%H:%M:%S")
-                color = RED if result.get("is_error") else GREEN
-                payload = json.dumps(result, ensure_ascii=False)
-                print(f"{color}[{ts}] {payload}{RESET}")
+                bridge.correction_ready.emit(result)
         finally:
-            queue.task_done()
+            correction_queue.task_done()
 
 
-async def run() -> None:
+async def backend_main(bridge: BackendBridge, stop_event: threading.Event) -> None:
     audio_manager = AudioManager()
     transcriber = Transcriber(model_size="tiny.en")
     corrector = Corrector(model="gpt-4o-mini")
@@ -64,43 +84,78 @@ async def run() -> None:
     audio_queue: asyncio.Queue[AudioChunk] = asyncio.Queue(maxsize=16)
     correction_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=32)
 
-    await audio_manager.start()
-
-    producer_task = asyncio.create_task(
-        produce_audio_chunks(audio_manager, audio_queue),
-        name="audio-producer",
-    )
-    transcription_task = asyncio.create_task(
-        consume_transcriptions(transcriber, audio_queue, correction_queue),
-        name="transcription-consumer",
-    )
-    correction_task = asyncio.create_task(
-        consume_corrections(corrector, correction_queue),
-        name="correction-consumer",
-    )
-
-    logger.info("SpeakPilot started. Press Ctrl+C to stop.")
+    producer_task: Optional[asyncio.Task] = None
+    transcription_task: Optional[asyncio.Task] = None
+    correction_task: Optional[asyncio.Task] = None
 
     try:
-        await asyncio.gather(producer_task, transcription_task, correction_task)
-    except asyncio.CancelledError:
-        raise
+        await audio_manager.start()
+        producer_task = asyncio.create_task(
+            produce_audio_chunks(audio_manager, audio_queue, stop_event),
+            name="audio-producer",
+        )
+        transcription_task = asyncio.create_task(
+            consume_transcriptions(transcriber, audio_queue, correction_queue, stop_event),
+            name="transcription-consumer",
+        )
+        correction_task = asyncio.create_task(
+            consume_corrections(corrector, correction_queue, bridge, stop_event),
+            name="correction-consumer",
+        )
+
+        while not stop_event.is_set():
+            await asyncio.sleep(0.2)
+    except Exception as exc:
+        logger.exception("Backend pipeline crashed")
+        bridge.backend_error.emit(str(exc))
     finally:
-        producer_task.cancel()
-        transcription_task.cancel()
-        correction_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await producer_task
-        with contextlib.suppress(asyncio.CancelledError):
-            await transcription_task
-        with contextlib.suppress(asyncio.CancelledError):
-            await correction_task
+        for task in (producer_task, transcription_task, correction_task):
+            if task is not None:
+                task.cancel()
+        for task in (producer_task, transcription_task, correction_task):
+            if task is not None:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("Error while stopping task %s", task.get_name())
+
         await audio_manager.stop()
+        bridge.backend_stopped.emit()
+
+
+def run_backend_thread(bridge: BackendBridge, stop_event: threading.Event) -> None:
+    asyncio.run(backend_main(bridge, stop_event))
+
+
+def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    app = QApplication(sys.argv)
+    overlay = FloatingWindow()
+    bridge = BackendBridge()
+    stop_event = threading.Event()
+
+    bridge.correction_ready.connect(overlay.update_from_result)
+    bridge.backend_error.connect(lambda msg: logger.error("Backend error: %s", msg))
+    bridge.backend_stopped.connect(lambda: logger.info("Backend stopped"))
+
+    backend_thread = threading.Thread(
+        target=run_backend_thread,
+        args=(bridge, stop_event),
+        name="speakpilot-backend",
+        daemon=True,
+    )
+    backend_thread.start()
+
+    def on_quit() -> None:
+        stop_event.set()
+        backend_thread.join(timeout=3)
+
+    app.aboutToQuit.connect(on_quit)
+    return app.exec()
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    try:
-        asyncio.run(run())
-    except KeyboardInterrupt:
-        logger.info("Shutting down SpeakPilot")
+    raise SystemExit(main())
