@@ -54,7 +54,7 @@ class AudioManager:
         channels: int = 1,
         frame_duration_ms: int = 30,
         vad_aggressiveness: int = 2,
-        silence_timeout_s: float = 0.8,
+        silence_timeout_s: float = 0.6,
         pre_speech_padding_ms: int = 300,
         device: Optional[int | str] = None,
         max_segment_s: float = 1.0,

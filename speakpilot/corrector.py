@@ -13,13 +13,8 @@ from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = (
-    "You are an English grammar corrector. "
-    "Fix grammar only. "
-    "Do not change meaning. "
-    "Return JSON: "
-    '{"corrected": "string", "explanation": "string (max 15 words)"}'
-)
+SYSTEM_PROMPT = "You are an expert English coach for non-native IT professionals. You are analyzing LIVE transcribed speech-to-text (STT) output. IMPORTANT: The input may contain STT hallucinations, phonetic misspellings, or cut-off words (e.g. 'except' instead of 'accept', 'right' instead of 'write'). FIRST, silently infer what the user ACTUALLY meant based on IT/conversational context. SECOND, check for actual grammatical errors or awkward phrasing in their intended meaning. ALWAYS respond in pure JSON format: {\"original\": \"the exact input\", \"corrected\": \"the better version\", \"is_error\": true/false, \"explanation\": \"Short 3-6 word reason\"}. If it's just a minor STT phonetic typo but the grammar of the intended sentence is fine, return is_error: false."
+
 
 
 class Corrector:

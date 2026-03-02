@@ -18,7 +18,7 @@ class Transcriber:
 
     def __init__(
         self,
-        model_size: str = "tiny.en",
+        model_size: str = "base.en",
         cpu_threads: int = 4,
         beam_size: int = 1,
         confidence_threshold: float = -1.0,
