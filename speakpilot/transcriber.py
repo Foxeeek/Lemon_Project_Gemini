@@ -5,22 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from dataclasses import dataclass
-from datetime import datetime
 from typing import Optional
 
 import numpy as np
 from faster_whisper import WhisperModel
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class TranscriptionResult:
-    text: str
-    started_at: float
-    ended_at: float
-    created_at: datetime
 
 
 class Transcriber:
@@ -31,10 +21,12 @@ class Transcriber:
         model_size: str = "tiny.en",
         cpu_threads: int = 4,
         beam_size: int = 1,
+        confidence_threshold: float = -1.0,
     ) -> None:
         self.model_size = model_size
         self.cpu_threads = cpu_threads
         self.beam_size = beam_size
+        self.confidence_threshold = confidence_threshold
 
         self.device = "cpu"
         self.compute_type = "int8"
@@ -52,6 +44,9 @@ class Transcriber:
             cpu_threads=self.cpu_threads,
         )
 
+        # Reduce noise from backend library logs.
+        logging.getLogger("faster_whisper").setLevel(logging.WARNING)
+
     @staticmethod
     def pcm16_bytes_to_float32(audio_bytes: bytes) -> np.ndarray:
         """Convert signed int16 PCM bytes into normalized float32 [-1, 1]."""
@@ -62,7 +57,6 @@ class Transcriber:
         if pcm.size == 0:
             return np.empty(0, dtype=np.float32)
 
-        # 32768 keeps -32768 mapping to -1.0 exactly.
         audio = pcm.astype(np.float32) / 32768.0
         return np.clip(audio, -1.0, 1.0)
 
@@ -82,12 +76,22 @@ class Transcriber:
             segments, _ = self.model.transcribe(
                 audio_np,
                 language="en",
+                task="transcribe",
                 beam_size=self.beam_size,
                 vad_filter=False,
                 condition_on_previous_text=False,
                 temperature=0.0,
             )
-            text = " ".join(segment.text.strip() for segment in segments).strip()
+
+            segment_list = list(segments)
+            if not segment_list:
+                return ""
+
+            avg_logprob = sum(seg.avg_logprob for seg in segment_list) / len(segment_list)
+            if avg_logprob < self.confidence_threshold:
+                return ""
+
+            text = " ".join(segment.text.strip() for segment in segment_list).strip()
             return text
         except Exception:
             logger.exception("Whisper transcription failed")
@@ -95,33 +99,12 @@ class Transcriber:
 
     @staticmethod
     def _clean_and_filter(text: str) -> Optional[str]:
-        if not text:
-            return None
-
-        normalized = re.sub(r"\s+", " ", text).strip()
-        lower = normalized.lower()
-
+        normalized = re.sub(r"\s+", " ", text or "").strip()
         if not normalized:
             return None
+
+        lower = normalized.lower()
         if lower in {"[blank_audio]", "blank_audio", "[ silence ]", "silence"}:
-            return None
-
-        # Drop ultra-short common silence hallucinations.
-        hallucinations = {
-            "thank you",
-            "thanks",
-            "you",
-            "okay",
-            "ok",
-            "bye",
-            "goodbye",
-        }
-        tokens = re.findall(r"[a-zA-Z']+", lower)
-        if len(tokens) <= 2 and " ".join(tokens) in hallucinations:
-            return None
-
-        # Drop 1-word transcripts to suppress noise.
-        if len(tokens) < 2:
             return None
 
         return normalized

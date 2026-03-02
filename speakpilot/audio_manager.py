@@ -57,7 +57,7 @@ class AudioManager:
         silence_timeout_s: float = 0.8,
         pre_speech_padding_ms: int = 300,
         device: Optional[int | str] = None,
-        max_segment_s: float = 15.0,
+        max_segment_s: float = 1.0,
     ) -> None:
         if frame_duration_ms not in (10, 20, 30):
             raise ValueError("frame_duration_ms must be one of: 10, 20, 30")
