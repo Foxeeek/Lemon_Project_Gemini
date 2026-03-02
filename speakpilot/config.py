@@ -1,0 +1,17 @@
+"""Runtime configuration for SpeakPilot."""
+
+INTERVIEW_MODE = False
+
+# Audio/STT tuning
+SAMPLE_RATE = 16_000
+CHANNELS = 1
+MAX_SEGMENT_SECONDS = 1.0
+
+# Correction debounce tuning
+DEBOUNCE_SILENCE_SECONDS = 0.7
+INTERVIEW_DEBOUNCE_SILENCE_SECONDS = 1.2
+MIN_WORDS_FOR_CORRECTION = 3
+
+# Overlay behavior
+OVERLAY_AUTO_HIDE_MS = 6000
+OVERLAY_FADE_IN_MS = 200
