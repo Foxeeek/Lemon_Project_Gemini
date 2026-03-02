@@ -12,11 +12,6 @@ from typing import Optional
 import numpy as np
 from faster_whisper import WhisperModel
 
-try:
-    import ctranslate2
-except Exception:  # pragma: no cover - optional introspection only
-    ctranslate2 = None
-
 logger = logging.getLogger(__name__)
 
 
@@ -41,8 +36,8 @@ class Transcriber:
         self.cpu_threads = cpu_threads
         self.beam_size = beam_size
 
-        self.device = self._detect_device()
-        self.compute_type = "float16" if self.device == "cuda" else "int8"
+        self.device = "cpu"
+        self.compute_type = "int8"
 
         logger.info(
             "Loading whisper model size=%s device=%s compute_type=%s",
@@ -56,17 +51,6 @@ class Transcriber:
             compute_type=self.compute_type,
             cpu_threads=self.cpu_threads,
         )
-
-    @staticmethod
-    def _detect_device() -> str:
-        """Prefer CUDA when available, otherwise CPU."""
-        if ctranslate2 is None:
-            return "cpu"
-
-        try:
-            return "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
-        except Exception:
-            return "cpu"
 
     @staticmethod
     def pcm16_bytes_to_float32(audio_bytes: bytes) -> np.ndarray:
